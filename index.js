@@ -1,4 +1,8 @@
-const { Client, GatewayIntentBits, Partials, Events, ActionRowBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle, View } = require("discord.js");
+const { 
+  Client, GatewayIntentBits, Partials, Events, ActionRowBuilder, 
+  StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, 
+  ButtonBuilder, ButtonStyle, View, EmbedBuilder 
+} = require("discord.js");
 const express = require("express");
 
 const client = new Client({
@@ -9,14 +13,14 @@ const client = new Client({
 // ===== Express 保活 =====
 const app = express();
 app.get("/", (req, res) => res.send("Bot is running"));
-app.listen(process.env.PORT || 3000);
+app.listen(process.env.PORT || 3000, () => console.log("✅ Express server running"));
 
 // ===== 設定 =====
 let config = {
   adminRoleId: process.env.ADMIN_ROLE_ID || null,
   welcomeChannelId: process.env.WELCOME_CHANNEL_ID || null,
   welcomeMessage: "🎉 歡迎 {user} 加入 {server}！目前伺服器正在開發中，敬請期待！",
-  announcementChannels: {}  // 每個伺服器公告頻道
+  announcementChannels: {}
 };
 
 // ===== 權限判斷 =====
@@ -96,12 +100,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const modal = new ModalBuilder()
       .setCustomId("welcome_modal")
       .setTitle("設定歡迎訊息");
+
     const input = new TextInputBuilder()
       .setCustomId("welcome_text")
       .setLabel("歡迎訊息（可用 {user} / {server}）")
       .setStyle(TextInputStyle.Paragraph)
       .setRequired(true)
       .setValue(config.welcomeMessage);
+
     modal.addComponents(new ActionRowBuilder().addComponents(input));
     return interaction.showModal(modal);
   }
@@ -112,14 +118,100 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ===== 新成員歡迎 =====
+// ===== 新成員歡迎（Embed + @新用戶） =====
 client.on(Events.GuildMemberAdd, async (member) => {
   if (!config.welcomeChannelId) return;
   const channel = member.guild.channels.cache.get(config.welcomeChannelId);
   if (!channel) return;
-  const msg = config.welcomeMessage.replace(/{user}/g, `${member}`).replace(/{server}/g, member.guild.name);
-  channel.send(msg);
+
+  const embed = new EmbedBuilder()
+    .setColor("Random")
+    .setTitle("🎉 歡迎新成員！")
+    .setDescription(config.welcomeMessage.replace(/{user}/g, `${member}`).replace(/{server}/g, member.guild.name))
+    .setTimestamp();
+
+  channel.send({ content: `${member}`, embeds: [embed] });
 });
 
 // ===== /announce =====
-// （同之前公告流程，支援 @everyone，下拉選伺服器 → 選是否 @everyone → Modal）
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (interaction.commandName === "announce") {
+    if (!hasPermission(interaction.member)) return interaction.reply({ content: "❌ 你沒有權限", ephemeral: true });
+
+    const guildOptions = client.guilds.cache.map(g => ({ label: g.name, value: g.id })).slice(0, 25);
+    const guildSelect = new StringSelectMenuBuilder()
+      .setCustomId("announce_guild")
+      .setPlaceholder("選擇要公告的伺服器")
+      .addOptions(guildOptions);
+
+    return interaction.reply({ content: "📢 選擇伺服器", components: [new ActionRowBuilder().addComponents(guildSelect)], ephemeral: true });
+  }
+});
+
+// ===== 公告流程（選伺服器 → 是否 @everyone → Modal） =====
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
+
+  // 選擇伺服器
+  if (interaction.isStringSelectMenu() && interaction.customId === "announce_guild") {
+    const guildId = interaction.values[0];
+    const pingMenu = new StringSelectMenuBuilder()
+      .setCustomId(`announce_ping_${guildId}`)
+      .setPlaceholder("是否 @everyone")
+      .addOptions([
+        { label: "📣 公告並 @everyone", value: "yes" },
+        { label: "🔕 公告但不 @everyone", value: "no" }
+      ]);
+    return interaction.update({ content: "📢 是否 @everyone？", components: [new ActionRowBuilder().addComponents(pingMenu)] });
+  }
+
+  // 是否 @everyone
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith("announce_ping_")) {
+    const guildId = interaction.customId.replace("announce_ping_", "");
+    const ping = interaction.values[0];
+
+    const modal = new ModalBuilder()
+      .setCustomId(`announce_modal_${guildId}_${ping}`)
+      .setTitle("填寫公告內容");
+
+    const input = new TextInputBuilder()
+      .setCustomId("announce_text")
+      .setLabel("公告內容")
+      .setStyle(TextInputStyle.Paragraph)
+      .setRequired(true);
+
+    modal.addComponents(new ActionRowBuilder().addComponents(input));
+    return interaction.showModal(modal);
+  }
+
+  // Modal 提交 → 發送公告
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("announce_modal_")) {
+    const [ , , guildId, ping ] = interaction.customId.split("_");
+    const content = interaction.fields.getTextInputValue("announce_text");
+
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return interaction.reply({ content: "❌ 找不到伺服器", ephemeral: true });
+
+    const channelId = config.announcementChannels[guildId];
+    const channel = guild.channels.cache.get(channelId);
+    if (!channel || !channel.isTextBased()) return interaction.reply({ content: "❌ 公告頻道無效", ephemeral: true });
+
+    let msg = `📢 **公告**\n\n${content}`;
+    if (ping === "yes" && channel.permissionsFor(guild.members.me).has("MentionEveryone")) {
+      msg = `@everyone\n${msg}`;
+    }
+
+    await channel.send({ content: msg });
+    return interaction.reply({ content: "✅ 公告已發送", ephemeral: true });
+  }
+});
+
+// ===== Bot 上線 =====
+client.once(Events.ClientReady, async () => {
+  await client.application.commands.create({ name: "config", description: "伺服器設定面板" });
+  await client.application.commands.create({ name: "announce", description: "發送公告" });
+  console.log(`✅ Bot 已啟動：${client.user.tag}`);
+});
+
+client.login(process.env.DISCORD_TOKEN);
