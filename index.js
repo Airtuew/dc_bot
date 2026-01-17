@@ -214,5 +214,24 @@ client.once(Events.ClientReady, async () => {
   await client.application.commands.create({ name: "announce", description: "發送公告" });
   console.log(`✅ Bot 已啟動：${client.user.tag}`);
 });
+// ===== 文字指令 !config =====
+client.on("messageCreate", async (message) => {
+  // 忽略 Bot 自己
+  if (message.author.bot) return;
+
+  // 文字命令
+  if (message.content === "!config") {
+    if (!hasPermission(message.member))
+      return message.reply("❌ 你沒有權限使用此指令");
+
+    // 送出設定面板
+    message.reply({
+      content: "🔧 **伺服器設定面板**",
+      components: getConfigComponents(message.guild),
+    });
+  }
+});
+
 
 client.login(process.env.DISCORD_TOKEN);
+
