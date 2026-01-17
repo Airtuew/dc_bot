@@ -1,7 +1,7 @@
 const { 
   Client, GatewayIntentBits, Partials, Events, ActionRowBuilder, 
   StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, 
-  ButtonBuilder, ButtonStyle, View, EmbedBuilder 
+  ButtonBuilder, ButtonStyle, EmbedBuilder 
 } = require("discord.js");
 const express = require("express");
 
@@ -29,57 +29,61 @@ const hasPermission = (member) => {
   return member.roles.cache.has(config.adminRoleId);
 };
 
-// ===== Config 面板 =====
-class ConfigView extends View {
-  constructor(guild) {
-    super({ timeout: 180 });
+// ===== Config Components =====
+function getConfigComponents(guild) {
+  const roleOptions = guild.roles.cache
+    .filter(r => !r.managed && r.id !== guild.id)
+    .map(r => ({ label: r.name, value: r.id }))
+    .slice(0, 25);
 
-    const roleOptions = guild.roles.cache
-      .filter(r => !r.managed && r.id !== guild.id)
-      .map(r => ({ label: r.name, value: r.id }))
-      .slice(0, 25);
+  const adminRoleSelect = new StringSelectMenuBuilder()
+    .setCustomId("set_admin_role")
+    .setPlaceholder("選擇可使用機器人指令的身份組")
+    .addOptions(roleOptions);
+  const roleRow = new ActionRowBuilder().addComponents(adminRoleSelect);
 
-    const adminRoleSelect = new StringSelectMenuBuilder()
-      .setCustomId("set_admin_role")
-      .setPlaceholder("選擇可使用機器人指令的身份組")
-      .addOptions(roleOptions);
-    this.addItem(new ActionRowBuilder().addComponents(adminRoleSelect));
+  const channelOptions = guild.channels.cache
+    .filter(c => c.isTextBased())
+    .map(c => ({ label: `#${c.name}`, value: c.id }))
+    .slice(0, 25);
 
-    const channelOptions = guild.channels.cache
-      .filter(c => c.isTextBased())
-      .map(c => ({ label: `#${c.name}`, value: c.id }))
-      .slice(0, 25);
+  const welcomeSelect = new StringSelectMenuBuilder()
+    .setCustomId("set_welcome_channel")
+    .setPlaceholder("選擇歡迎訊息頻道")
+    .addOptions(channelOptions);
+  const welcomeRow = new ActionRowBuilder().addComponents(welcomeSelect);
 
-    const welcomeChannelSelect = new StringSelectMenuBuilder()
-      .setCustomId("set_welcome_channel")
-      .setPlaceholder("選擇歡迎訊息頻道")
-      .addOptions(channelOptions);
-    this.addItem(new ActionRowBuilder().addComponents(welcomeChannelSelect));
+  const announceSelect = new StringSelectMenuBuilder()
+    .setCustomId("set_announce_channel")
+    .setPlaceholder("選擇公告頻道")
+    .addOptions(channelOptions);
+  const announceRow = new ActionRowBuilder().addComponents(announceSelect);
 
-    const announceChannelSelect = new StringSelectMenuBuilder()
-      .setCustomId("set_announce_channel")
-      .setPlaceholder("選擇公告頻道")
-      .addOptions(channelOptions);
-    this.addItem(new ActionRowBuilder().addComponents(announceChannelSelect));
+  const welcomeButton = new ButtonBuilder()
+    .setCustomId("edit_welcome")
+    .setLabel("📝 設定歡迎文字")
+    .setStyle(ButtonStyle.Primary);
+  const buttonRow = new ActionRowBuilder().addComponents(welcomeButton);
 
-    const welcomeButton = new ButtonBuilder()
-      .setCustomId("edit_welcome")
-      .setLabel("📝 設定歡迎文字")
-      .setStyle(ButtonStyle.Primary);
-    this.addItem(new ActionRowBuilder().addComponents(welcomeButton));
-  }
+  return [roleRow, welcomeRow, announceRow, buttonRow];
 }
 
 // ===== /config =====
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName === "config") {
-    if (!hasPermission(interaction.member)) return interaction.reply({ content: "❌ 你沒有權限使用此指令", ephemeral: true });
-    return interaction.reply({ content: "🔧 **伺服器設定面板**", components: [new ConfigView(interaction.guild)], ephemeral: true });
+    if (!hasPermission(interaction.member))
+      return interaction.reply({ content: "❌ 你沒有權限使用此指令", ephemeral: true });
+
+    return interaction.reply({ 
+      content: "🔧 **伺服器設定面板**", 
+      components: getConfigComponents(interaction.guild), 
+      ephemeral: true 
+    });
   }
 });
 
-// ===== 下拉選單 & 按鈕 =====
+// ===== 下拉 & 按鈕 =====
 client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.isStringSelectMenu()) {
     if (interaction.customId === "set_admin_role") {
@@ -149,11 +153,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-// ===== 公告流程（選伺服器 → 是否 @everyone → Modal） =====
+// ===== 公告流程 =====
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isStringSelectMenu() && !interaction.isModalSubmit()) return;
 
-  // 選擇伺服器
   if (interaction.isStringSelectMenu() && interaction.customId === "announce_guild") {
     const guildId = interaction.values[0];
     const pingMenu = new StringSelectMenuBuilder()
@@ -166,7 +169,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.update({ content: "📢 是否 @everyone？", components: [new ActionRowBuilder().addComponents(pingMenu)] });
   }
 
-  // 是否 @everyone
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("announce_ping_")) {
     const guildId = interaction.customId.replace("announce_ping_", "");
     const ping = interaction.values[0];
@@ -185,7 +187,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     return interaction.showModal(modal);
   }
 
-  // Modal 提交 → 發送公告
   if (interaction.isModalSubmit() && interaction.customId.startsWith("announce_modal_")) {
     const [ , , guildId, ping ] = interaction.customId.split("_");
     const content = interaction.fields.getTextInputValue("announce_text");
