@@ -15,29 +15,24 @@ const {
 const express = require("express");
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
-  ],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   partials: [Partials.Channel]
 });
 
-/* ===== Express（Render 保活） ===== */
+/* ===== Express 保活 ===== */
 const app = express();
 app.get("/", (req, res) => res.send("Bot is running"));
 app.listen(process.env.PORT || 3000, () =>
   console.log("✅ Express server running")
 );
 
-/* ===== 設定資料 ===== */
+/* ===== 設定 ===== */
 let config = {
   adminRoleId: null,
   autoRoleId: null,
-
-  // 多頻道歡迎（channelId: message）
-  welcomeChannels: {},
-
-  announcementChannels: {}
+  welcomeChannels: {}, // channelId: 歡迎訊息
+  announcementChannels: {}, // guildId: channelId
+  buttonPanels: {} // channelId: [{ label, addRole, removeRole, response }]
 };
 
 /* ===== 權限判斷 ===== */
@@ -47,7 +42,7 @@ function hasPermission(member) {
   return member.roles.cache.has(config.adminRoleId);
 }
 
-/* ===== 產生 Config 面板 ===== */
+/* ===== 工具函數: 產生 Config 面板 ===== */
 function getConfigComponents(guild) {
   const roleOptions = guild.roles.cache
     .filter(r => !r.managed && r.id !== guild.id)
@@ -81,61 +76,59 @@ function getConfigComponents(guild) {
   ];
 }
 
-/* ===== Slash 指令 ===== */
-client.on(Events.InteractionCreate, async interaction => {
-  if (!interaction.isChatInputCommand()) return;
+/* ===== 指令監聽 (Slash + ! 指令) ===== */
+client.on(Events.MessageCreate, async message => {
+  if (message.author.bot) return;
 
-  if (interaction.commandName === "config") {
-    if (!hasPermission(interaction.member))
-      return interaction.reply({
-        content: "❌ 你沒有權限",
-        ephemeral: true
-      });
+  const content = message.content.trim();
 
-    return interaction.reply({
-      content: "🔧 伺服器設定面板",
-      components: getConfigComponents(interaction.guild),
-      ephemeral: true
-    });
+  if (content === "!config" || content === "/config") {
+    if (!hasPermission(message.member))
+      return message.reply("❌ 你沒有權限");
+
+    const components = getConfigComponents(message.guild);
+    return message.reply({ content: "🔧 伺服器設定面板", components });
   }
 
-  if (interaction.commandName === "announce") {
-    if (!hasPermission(interaction.member))
-      return interaction.reply({ content: "❌ 你沒有權限", ephemeral: true });
+  if (content === "!announce" || content === "/announce") {
+    if (!hasPermission(message.member))
+      return message.reply("❌ 你沒有權限");
 
     const guildOptions = client.guilds.cache.map(g => ({
       label: g.name,
       value: g.id
     })).slice(0, 25);
 
-    return interaction.reply({
-      content: "選擇公告伺服器",
-      components: [
-        new ActionRowBuilder().addComponents(
-          new StringSelectMenuBuilder()
-            .setCustomId("announce_guild")
-            .setPlaceholder("選擇伺服器")
-            .addOptions(guildOptions)
-        )
-      ],
-      ephemeral: true
-    });
+    const row = new ActionRowBuilder().addComponents(
+      new StringSelectMenuBuilder()
+        .setCustomId("announce_guild")
+        .setPlaceholder("選擇伺服器")
+        .addOptions(guildOptions)
+    );
+
+    return message.reply({ content: "📢 選擇伺服器", components: [row] });
   }
 });
 
-/* ===== 下拉 / Modal ===== */
+/* ===== Interaction (下拉 + Modal + 按鈕) ===== */
 client.on(Events.InteractionCreate, async interaction => {
+
+  // ===== 下拉選單 =====
   if (interaction.isStringSelectMenu()) {
+
+    // 管理身份組
     if (interaction.customId === "set_admin_role") {
       config.adminRoleId = interaction.values[0];
       return interaction.reply({ content: "✅ 已設定管理身份組", ephemeral: true });
     }
 
+    // 新成員身份組
     if (interaction.customId === "set_auto_role") {
       config.autoRoleId = interaction.values[0];
       return interaction.reply({ content: "✅ 已設定新成員身份組", ephemeral: true });
     }
 
+    // 新增歡迎頻道
     if (interaction.customId === "add_welcome_channel") {
       const channelId = interaction.values[0];
 
@@ -156,48 +149,99 @@ client.on(Events.InteractionCreate, async interaction => {
 
       return interaction.showModal(modal);
     }
+
+    // 公告選擇伺服器
+    if (interaction.customId === "announce_guild") {
+      const guildId = interaction.values[0];
+      const guild = client.guilds.cache.get(guildId);
+      if (!guild) return interaction.reply({ content: "❌ 找不到伺服器", ephemeral: true });
+
+      const channelOptions = guild.channels.cache
+        .filter(c => c.isTextBased())
+        .map(c => ({ label: `#${c.name}`, value: c.id }))
+        .slice(0, 25);
+
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`announce_channel_${guildId}`)
+          .setPlaceholder("選擇公告頻道")
+          .addOptions(channelOptions)
+      );
+
+      return interaction.update({ content: "選擇公告頻道", components: [row] });
+    }
+
+    // 公告選擇 @everyone
+    if (interaction.customId.startsWith("announce_channel_")) {
+      const guildId = interaction.customId.replace("announce_channel_", "");
+      const channelId = interaction.values[0];
+
+      const modal = new ModalBuilder()
+        .setCustomId(`announce_modal_${guildId}_${channelId}`)
+        .setTitle("填寫公告內容");
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("text")
+            .setLabel("公告內容")
+            .setStyle(TextInputStyle.Paragraph)
+            .setRequired(true)
+        )
+      );
+
+      return interaction.showModal(modal);
+    }
   }
 
-  if (interaction.isModalSubmit()
-   && interaction.customId.startsWith("welcome_modal_")) {
+  // ===== Modal 提交 =====
+  if (interaction.isModalSubmit()) {
+    // 歡迎訊息
+    if (interaction.customId.startsWith("welcome_modal_")) {
+      const channelId = interaction.customId.replace("welcome_modal_", "");
+      const text = interaction.fields.getTextInputValue("text");
+      config.welcomeChannels[channelId] = text;
+      return interaction.reply({ content: "✅ 已設定歡迎訊息", ephemeral: true });
+    }
 
-    const channelId = interaction.customId.replace("welcome_modal_", "");
-    const text = interaction.fields.getTextInputValue("text");
+    // 公告
+    if (interaction.customId.startsWith("announce_modal_")) {
+      const [ , guildId, channelId] = interaction.customId.split("_");
+      const content = interaction.fields.getTextInputValue("text");
 
-    config.welcomeChannels[channelId] = text;
+      const guild = client.guilds.cache.get(guildId);
+      if (!guild) return interaction.reply({ content: "❌ 找不到伺服器", ephemeral: true });
 
-    return interaction.reply({
-      content: "✅ 已設定該頻道的歡迎訊息",
-      ephemeral: true
-    });
+      const channel = guild.channels.cache.get(channelId);
+      if (!channel || !channel.isTextBased())
+        return interaction.reply({ content: "❌ 無效公告頻道", ephemeral: true });
+
+      await channel.send({ content });
+      return interaction.reply({ content: "✅ 公告已發送", ephemeral: true });
+    }
   }
 });
 
 /* ===== 新成員加入 ===== */
 client.on(Events.GuildMemberAdd, async member => {
+  // 自動身份組
   if (config.autoRoleId) {
     const role = member.guild.roles.cache.get(config.autoRoleId);
     if (role) await member.roles.add(role).catch(() => {});
   }
 
+  // 多頻道歡迎訊息
   for (const [channelId, text] of Object.entries(config.welcomeChannels)) {
     const channel = member.guild.channels.cache.get(channelId);
-    if (!channel) continue;
+    if (!channel || !channel.isTextBased()) continue;
 
     const embed = new EmbedBuilder()
       .setColor("Random")
       .setTitle("🎉 歡迎加入")
-      .setDescription(
-        text
-          .replace(/{user}/g, `<@${member.id}>`)
-          .replace(/{server}/g, member.guild.name)
-      )
+      .setDescription(text.replace(/{user}/g, `<@${member.id}>`).replace(/{server}/g, member.guild.name))
       .setTimestamp();
 
-    await channel.send({
-      content: `<@${member.id}>`,
-      embeds: [embed]
-    }).catch(() => {});
+    await channel.send({ content: `<@${member.id}>`, embeds: [embed] }).catch(() => {});
   }
 });
 
@@ -207,6 +251,7 @@ client.once(Events.ClientReady, async () => {
     { name: "config", description: "伺服器設定" },
     { name: "announce", description: "發布公告" }
   ]);
+
   console.log(`✅ Bot 已啟動：${client.user.tag}`);
 });
 
